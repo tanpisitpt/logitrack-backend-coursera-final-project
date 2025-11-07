@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace LogiTrack.Controllers;
 
@@ -13,24 +14,32 @@ namespace LogiTrack.Controllers;
 public class InventoryController : ControllerBase
 {
   private readonly LogiTrackContext _db;
-  private readonly DbSet<InventoryItem> _inventoryContext;
+  private readonly IMemoryCache _cache;
+  private const string InventoryCacheKey = "inventory_items";
 
-  public InventoryController(LogiTrackContext db)
+
+  public InventoryController(LogiTrackContext db, IMemoryCache cache)
   {
     _db = db;
-    _inventoryContext = db.InventoryItems;
+    _cache = cache;
   }
 
   [HttpGet]
   public async Task<IActionResult> ListInventoryItems()
   {
-    var inventory = await _inventoryContext
-      .Select(item => new InventoryItemDto(
-        item.ItemId,
-        item.Name,
-        item.Quantity,
-        item.Location
-      )).ToListAsync();
+    var inventory = await _cache.GetOrCreateAsync(InventoryCacheKey, async entry =>
+    {
+      entry.SlidingExpiration = TimeSpan.FromSeconds(30);
+
+      return await _db.InventoryItems
+        .AsNoTracking()
+        .Select(item => new InventoryItemDto(
+          item.ItemId,
+          item.Name,
+          item.Quantity,
+          item.Location
+        )).ToListAsync();
+    });
 
     return Ok(inventory);
   }
@@ -46,7 +55,7 @@ public class InventoryController : ControllerBase
       Location = InventoryItemCreateDto.Location,
     };
 
-    _inventoryContext.Add(newItem);
+    _db.InventoryItems.Add(newItem);
 
     await _db.SaveChangesAsync();
 
@@ -57,6 +66,8 @@ public class InventoryController : ControllerBase
       newItem.Location
     );
 
+    _cache.Remove(InventoryCacheKey);
+
     return CreatedAtAction(nameof(ListInventoryItems), new { id = newItem.ItemId }, newItemDto);
   }
 
@@ -64,12 +75,12 @@ public class InventoryController : ControllerBase
   [Authorize(Roles = "Manager")]
   public async Task<IActionResult> DeleteInventoryItem(int id)
   {
-    InventoryItem? toDeleteItem = await _inventoryContext.FindAsync(id);
+    InventoryItem? toDeleteItem = await _db.InventoryItems.FindAsync(id);
 
     if (toDeleteItem == null)
       return NotFound($"Item with id {id} is not found.");
 
-    _inventoryContext.Remove(toDeleteItem!);
+    _db.InventoryItems.Remove(toDeleteItem!);
 
     await _db.SaveChangesAsync();
 

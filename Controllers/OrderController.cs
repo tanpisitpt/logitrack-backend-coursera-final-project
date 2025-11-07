@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace LogiTrack.Controllers;
 
@@ -13,29 +14,37 @@ namespace LogiTrack.Controllers;
 public class OrderController : ControllerBase
 {
   private readonly LogiTrackContext _db;
-  private readonly DbSet<Order> _orders;
+  private readonly IMemoryCache _cache;
+  private const string OrdersListCacheKey = "orders_list";
 
-  public OrderController(LogiTrackContext db)
+  public OrderController(LogiTrackContext db, IMemoryCache cache)
   {
     _db = db;
-    _orders = _db.Orders;
+    _cache = cache;
   }
 
   [HttpGet]
   public async Task<IActionResult> ListOrders()
   {
-    var orders = await _orders.Include(o => o.OrderItems).ThenInclude(oi => oi.InventoryItem).ToListAsync();
-
-    var ordersDto = orders.Select(o => new OrderDto(
-      o.OrderId,
-      o.CustomerName,
-      o.DatePlaced,
-      o.OrderItems.Select(oi => new OrderItemDto(
-        oi.ItemId,
-        oi.InventoryItem.Name,
-        oi.InventoryItem.Quantity
-      )).ToList())
-    );
+    var ordersDto = await _cache.GetOrCreateAsync(OrdersListCacheKey, async entry =>
+    {
+      entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30);
+      return await _db.Orders
+        .AsNoTracking()
+        .Include(o => o.OrderItems)
+        .ThenInclude(oi => oi.InventoryItem)
+        .Select(o => new OrderDto(
+          o.OrderId,
+          o.CustomerName,
+          o.DatePlaced,
+          o.OrderItems.Select(oi => new OrderItemDto(
+            oi.ItemId,
+            oi.InventoryItem.Name,
+            oi.InventoryItem.Quantity
+          )).ToList())
+        )
+        .ToListAsync();
+    });
 
     return Ok(ordersDto);
   }
@@ -43,26 +52,39 @@ public class OrderController : ControllerBase
   [HttpGet("{id}")]
   public async Task<IActionResult> GetOrder(int id)
   {
-    var order = await _orders
-      .Include(o => o.OrderItems)
-      .ThenInclude(oi => oi.InventoryItem)
-      .FirstOrDefaultAsync(o => o.OrderId == id);
+    var order = await _cache.GetOrCreateAsync($"order_{id}", async entry =>
+    {
+      var orderDto = await _db.Orders
+        .AsNoTracking()
+        .Include(o => o.OrderItems)
+        .ThenInclude(oi => oi.InventoryItem)
+        .Select(o => new OrderDto(
+          o.OrderId,
+          o.CustomerName,
+          o.DatePlaced,
+          o.OrderItems.Select(oi => new OrderItemDto(
+            oi.ItemId,
+            oi.InventoryItem.Name,
+            oi.Quantity)
+          ).ToList()
+        ))
+        .FirstOrDefaultAsync(o => o.OrderId == id);
+
+      if (orderDto == null)
+      {
+        entry.AbsoluteExpiration = DateTimeOffset.MinValue;
+        return null;
+      }
+      
+      entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
+
+      return orderDto;
+    });
 
     if (order == null)
       return NotFound();
 
-    var dto = new OrderDto(
-      order.OrderId,
-      order.CustomerName,
-      order.DatePlaced,
-      order.OrderItems.Select(oi => new OrderItemDto(
-        oi.ItemId,
-        oi.InventoryItem.Name,
-        oi.Quantity)
-      ).ToList()
-    );
-
-    return Ok(dto);
+    return Ok(order);
   }
 
   [HttpPost]
@@ -83,16 +105,27 @@ public class OrderController : ControllerBase
       newOrder.AddItem(item);
     }
 
-    _orders.Add(newOrder);
+    _db.Orders.Add(newOrder);
     // newOrder.OrderItems = 
 
     await _db.SaveChangesAsync();
+
+    await _db.Entry(newOrder)
+        .Collection(o => o.OrderItems)
+        .Query()
+        .Include(oi => oi.InventoryItem)
+        .LoadAsync();
+
+    _cache.Remove(OrdersListCacheKey);
 
     OrderDto newOrderDto = new OrderDto(
       newOrder.OrderId,
       newOrder.CustomerName,
       newOrder.DatePlaced,
-      newOrder.OrderItems.Select(oi => new OrderItemDto(oi.ItemId, oi.InventoryItem.Name, oi.Quantity)).ToList()
+      newOrder.OrderItems.Select(oi => new OrderItemDto(
+        oi.ItemId,
+        oi.InventoryItem.Name,
+        oi.Quantity)).ToList()
     );
 
     return CreatedAtAction(nameof(GetOrder), new { id = newOrder.OrderId }, newOrderDto);
@@ -102,12 +135,12 @@ public class OrderController : ControllerBase
   [Authorize(Roles = "Manager")]
   public async Task<IActionResult> DeleteOrder(int id)
   {
-    var order = await _orders.FindAsync(id);
+    var order = await _db.Orders.FindAsync(id);
 
     if (order == null)
       return NotFound($"Order id #{id} is not founded.");
 
-    _orders.Remove(order);
+    _db.Orders.Remove(order);
 
     await _db.SaveChangesAsync();
 

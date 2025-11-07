@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Serialization;
 using DotNetEnv;
 using LogiTrack.Data;
+using LogiTrack.Middlewares;
 using LogiTrack.Models;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -89,17 +90,18 @@ Console.WriteLine($"Environment: {app.Environment.EnvironmentName}");
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<RequestTimingMiddleware>();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
-    app.UseSwagger();
-    app.UseSwaggerUI(options =>
-    {
-        options.SwaggerEndpoint("/openapi/v1.json", "v1");
-        options.RoutePrefix = "swagger";
-    });
+  app.MapOpenApi();
+  app.UseSwagger();
+  app.UseSwaggerUI(options =>
+  {
+    options.SwaggerEndpoint("/openapi/v1.json", "v1");
+    options.RoutePrefix = "swagger";
+  });
 }
 
 app.MapControllers();
